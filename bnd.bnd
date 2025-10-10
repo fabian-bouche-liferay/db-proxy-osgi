@@ -1,0 +1,3 @@
+Bundle-Name: osgi-db-proxy-object-entry-manager
+Bundle-SymbolicName: com.liferay.samples.fbo.db.proxy
+Bundle-Version: 1.0.0
