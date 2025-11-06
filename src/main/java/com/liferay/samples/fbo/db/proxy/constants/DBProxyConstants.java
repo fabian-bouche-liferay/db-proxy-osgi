@@ -12,5 +12,6 @@ public class DBProxyConstants {
 	public static final String TYPE_DATE = "date";
 	public static final String TYPE_DATETIME = "datetime";
 	public static final String TYPE_TEXT = "text";
+	public static final String TYPE_INTEGER = "integer";
 
 }

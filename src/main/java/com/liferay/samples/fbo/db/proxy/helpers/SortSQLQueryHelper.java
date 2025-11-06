@@ -6,10 +6,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Construit un ORDER BY sécurisé (whitelist des colonnes).
- * Aucune valeur utilisateur ici.
- */
 public final class SortSQLQueryHelper {
 
     private SortSQLQueryHelper() {}

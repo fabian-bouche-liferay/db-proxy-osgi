@@ -4,9 +4,14 @@ import com.liferay.object.model.ObjectDefinition;
 import com.liferay.object.rest.dto.v1_0.ObjectEntry;
 import com.liferay.object.rest.manager.v1_0.BaseObjectEntryManager;
 import com.liferay.object.rest.manager.v1_0.ObjectEntryManager;
+import com.liferay.object.service.ObjectDefinitionLocalService;
 import com.liferay.petra.string.StringPool;
+import com.liferay.portal.kernel.exception.PortalException;
 import com.liferay.portal.kernel.json.JSONFactory;
+import com.liferay.portal.kernel.log.Log;
+import com.liferay.portal.kernel.log.LogFactoryUtil;
 import com.liferay.portal.kernel.search.Sort;
+import com.liferay.portal.kernel.security.auth.CompanyThreadLocal;
 import com.liferay.portal.kernel.service.CompanyLocalService;
 import com.liferay.portal.vulcan.aggregation.Aggregation;
 import com.liferay.portal.vulcan.dto.converter.DTOConverter;
@@ -23,55 +28,32 @@ import com.liferay.samples.fbo.db.proxy.helpers.SortSQLQueryHelper;
 import com.liferay.samples.fbo.db.proxy.helpers.SqlFragment;
 import com.liferay.samples.fbo.db.proxy.helpers.SqlStringUtil;
 import com.liferay.samples.fbo.db.proxy.mapping.DBField;
+import com.liferay.samples.fbo.db.proxy.mapping.DBRel;
 import com.liferay.samples.fbo.db.proxy.mapping.DBTableConfig;
+import com.liferay.samples.fbo.db.proxy.mapping.DBTableConfigReaderUtil;
 
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.osgi.service.component.annotations.Component;
 import org.osgi.service.component.annotations.Reference;
 
 @Component(
-		property = "object.entry.manager.storage.type=" + DBProxyConstants.DB_PROXY,
+		property = "object.entry.manager.storage.type=" + DBProxyConstants.DB_PROXY + "_PARENT_CHILD",
 		service = ObjectEntryManager.class
 )
-public class DBProxyObjectEntryManager extends BaseObjectEntryManager
+public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
 	implements ObjectEntryManager {
-
-    private static final String DB_TABLE = "energy_distribution";
-
-    private static final Map<String, DBField> FIELD_MAP;
-
-    static {
-        Map<String, DBField> map = new LinkedHashMap<>();
-
-        map.put("externalReferenceCode",
-            new DBField("id", "text", false, "energy_distribution_"));
-
-        map.put("measurementDate",
-            new DBField("measurement_date", "date"));
-
-        map.put("energySource",
-            new DBField("energy_source", "picklist"));
-
-        map.put("distributionStatus",
-            new DBField("status", "picklist"));
-
-        map.put("energyKWH",
-            new DBField("energy_kwh", "decimal"));
-
-        map.put("region",
-            new DBField("region", "text", true, StringPool.BLANK));
-
-        FIELD_MAP = map;
-    }
-
-    private static final DBTableConfig CONFIG = new DBTableConfig(DB_TABLE, FIELD_MAP);
 	
     @Override
     public ObjectEntry addObjectEntry(
@@ -80,8 +62,13 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
             ObjectEntry objectEntry,
             String scopeKey) throws Exception {
 
-        final String table = CONFIG.getTableName();
-        final Map<String, DBField> fields = CONFIG.getFields();
+    	final String objERC = objectDefinition.getExternalReferenceCode();
+
+    	DBTableConfig config = DBTableConfigReaderUtil.getDBTableConfig(objERC);
+    	
+        final String table = config.getTableName();
+        final Map<String, DBField> fields = config.getFields();
+        final Map<String, DBRel> rels = config.getRels();
 
         List<String> cols = new ArrayList<>();
         List<Object> vals = new ArrayList<>();
@@ -90,8 +77,10 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
                 ? new LinkedHashMap<>(objectEntry.getProperties())
                 : new LinkedHashMap<>();
 
-	    String prefix = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
+	    String prefix = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
+
         Long explicitId = IdManagementHelper.extractIdFromValue(objectEntry.getExternalReferenceCode(), prefix);
+        
         if (explicitId != null) {
             String idCol = fields.get(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getDbColumn();
             cols.add(idCol); vals.add(explicitId);
@@ -109,7 +98,7 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
             cols.add(fdef.getDbColumn());
             vals.add(jdbcVal);
         }
-
+        
         String insertSql = "INSERT INTO " + table + " (" + String.join(", ", cols) + ") VALUES ("
                 + SqlStringUtil.nPlaceholders(cols.size()) + ")";
 
@@ -134,10 +123,55 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
                 throw new IllegalStateException("Unable to determine generated ID for insert into " + table);
             }
         }
-        
+
         String erc = StringPool.BLANK.equals(prefix)
                 ? String.valueOf(generatedId)
-                : CONFIG.generateExternalReferenceCode(generatedId, prefix);
+                : config.generateExternalReferenceCode(generatedId, prefix);
+
+        long companyId = CompanyThreadLocal.getCompanyId();
+        
+        for (Map.Entry<String, DBRel> e : rels.entrySet()) {
+        	
+        	String relName = e.getKey();
+        	DBRel relDef = e.getValue();
+        	
+        	Object raw = props.get(relName);
+        	if (raw == null) continue;
+        	        	
+        	ObjectDefinition objectDef = _objectDefinitionLocalService.getObjectDefinitionByExternalReferenceCode(relDef.getObjectDefERC(), companyId);
+        	
+        	ObjectEntry relObjectEntry = new ObjectEntry();
+        	
+			String relPrefix = relDef.getForeignKeyFieldPrefix();
+			String relType = relDef.getForeignKeyFieldType();
+			
+        	if(raw instanceof ArrayList) {
+        		
+        		ArrayList<Map<String, Object>> relPropsArray = (ArrayList<Map<String, Object>>) raw;
+
+        		relPropsArray.forEach((relProps) -> {
+
+        			Map<String, Object> extractedRelProps = new HashMap<>();
+        			
+        			relProps.put(relDef.getForeignKeyField(), IdManagementHelper.parseIdParamFromValue(objectEntry.getExternalReferenceCode(), relPrefix, relType));
+        			relProps.forEach((key, value) -> {
+        				if("externalReferenceCode".equals(key)) {
+        					relObjectEntry.setExternalReferenceCode((String) value);
+        				} else {
+        					extractedRelProps.put(key, value);
+        				}
+        			});
+        			relObjectEntry.setProperties(extractedRelProps);
+                	try {
+						addObjectEntry(dtoConverterContext, objectDef, relObjectEntry, scopeKey);
+					} catch (Exception e1) {
+						_log.warn("Failed to add related object", e1);
+					}
+        		});
+
+        	}
+        	
+        }
 
         return getObjectEntry(objectDefinition.getCompanyId(), dtoConverterContext, erc, objectDefinition, scopeKey);
     }
@@ -150,10 +184,14 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
             ObjectDefinition objectDefinition,
             String scopeKey) throws Exception {
 
-        final String table = CONFIG.getTableName();
-        final String idCol = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getDbColumn();
+    	final String objERC = objectDefinition.getExternalReferenceCode();
 
-	    String prefix = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
+    	DBTableConfig config = DBTableConfigReaderUtil.getDBTableConfig(objERC);
+
+        final String table = config.getTableName();
+        final String idCol = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getDbColumn();
+
+	    String prefix = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
 
         Object idParam = IdManagementHelper.parseIdParamFromValue(externalReferenceCode, prefix, DBProxyConstants.TYPE_INTEGER);
 
@@ -181,11 +219,15 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
             ObjectEntry objectEntry,
             String scopeKey) throws Exception {
 
-        final String table  = CONFIG.getTableName();
-        final Map<String, DBField> fields = CONFIG.getFields();
+    	final String objERC = objectDefinition.getExternalReferenceCode();
+
+    	DBTableConfig config = DBTableConfigReaderUtil.getDBTableConfig(objERC);
+    	
+        final String table  = config.getTableName();
+        final Map<String, DBField> fields = config.getFields();
         final String idCol = fields.get(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getDbColumn();
 
-	    String prefix = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
+	    String prefix = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
 
         Object idParam = IdManagementHelper.parseIdParamFromValue(externalReferenceCode, prefix, DBProxyConstants.TYPE_INTEGER);
 
@@ -245,13 +287,17 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 		String filterString, Pagination pagination, String search,
 		Sort[] sorts) throws Exception {
 
-		String table = CONFIG.getTableName();
+    	final String objERC = objectDefinition.getExternalReferenceCode();
+
+    	DBTableConfig config = DBTableConfigReaderUtil.getDBTableConfig(objERC);
+    	
+		String table = config.getTableName();
 		Map<String, String> fieldToColumn = new LinkedHashMap<>();
-		for (Map.Entry<String, DBField> e : CONFIG.getFields().entrySet()) {
+		for (Map.Entry<String, DBField> e : config.getFields().entrySet()) {
 			fieldToColumn.put(e.getKey(), e.getValue().getDbColumn());
 		}
 
-		java.util.List<String> searchableCols = CONFIG.getSearchableColumns();
+		java.util.List<String> searchableCols = config.getSearchableColumns();
 
 		String baseWhere = "";
 		java.util.List<Object> baseParams = new java.util.ArrayList<>();
@@ -264,11 +310,11 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 			SqlFragment filterFrag = FilterSQLQueryHelper.build(
 				    filterString,
 				    fieldToColumn,
-				    CONFIG.getFields(),
+				    config.getFields(),
 				    zoneIdFromContext(dtoConverterContext)
 				);
 			SqlFragment searchFrag = SearchSQLQueryHelper.build(search, searchableCols, dbProduct);
-			String defaultOrderBy = IdManagementHelper.computeDefaultOrderBy(CONFIG);
+			String defaultOrderBy = IdManagementHelper.computeDefaultOrderBy(config);
 			String orderBy = SortSQLQueryHelper.build(sorts, fieldToColumn, defaultOrderBy);
 
 			List<String> whereClauses = new ArrayList<>();
@@ -330,28 +376,107 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 	    String externalReferenceCode, ObjectDefinition objectDefinition,
 	    String scopeKey) throws Exception {
 
-	    String table = CONFIG.getTableName();
-	    String idColumn = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getDbColumn();
+		String nestedFieldsParam = dtoConverterContext.getHttpServletRequest().getParameter("nestedFields");
+		
+		Collection<String> nestedFields;
+		
+		if(nestedFieldsParam == null) {
+			nestedFields = Collections.emptyList();
+		} else {
+			nestedFields = Stream.of(nestedFieldsParam.split(","))
+	                .collect(Collectors.toCollection(ArrayList::new));
+		}
+
+		
+    	final String objERC = objectDefinition.getExternalReferenceCode();
+
+    	DBTableConfig config = DBTableConfigReaderUtil.getDBTableConfig(objERC);
+		
+	    String table = config.getTableName();
+	    String idColumn = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getDbColumn();
 
 	    String sql = "SELECT * FROM " + table + " WHERE " + idColumn + " = ?";
 
 	    try (java.sql.Connection con = _dsProvider.getDataSource().getConnection();
 	         java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
 
-		    String prefix = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
+		    String prefix = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).getPrefix();
 
-	        Object idParam = IdManagementHelper.parseIdParamFromValue(externalReferenceCode, prefix, DBProxyConstants.TYPE_INTEGER);
+		    Object idParam = IdManagementHelper.parseIdParamFromValue(externalReferenceCode, prefix, DBProxyConstants.TYPE_INTEGER);
 	        ps.setObject(1, idParam);
 
 	        try (java.sql.ResultSet rs = ps.executeQuery()) {
 	            if (!rs.next()) {
 	                throw new java.util.NoSuchElementException("No entry found for ERC: " + externalReferenceCode);
 	            }
-	            return mapRowToObjectEntry(objectDefinition, rs, dtoConverterContext);
+	            
+	            ObjectEntry objectEntry = mapRowToObjectEntry(objectDefinition, rs, dtoConverterContext);
+	            
+	            config.getRels().forEach((key, rel) -> {
+	            	if(nestedFields.contains(key)) {
+	            		String relatedObjectDefinitionExternalReferenceCode = rel.getObjectDefERC(); 
+	            		ObjectDefinition relatedObjectDefinition;
+						try {
+							relatedObjectDefinition = _objectDefinitionLocalService.getObjectDefinitionByExternalReferenceCode(relatedObjectDefinitionExternalReferenceCode, companyId);
+							
+		            		String filterString = rel.getForeignKeyField() + " eq " + externalReferenceCode;
+		            		try {
+								Collection<ObjectEntry> relatedObjectEntries = getObjectEntries(companyId, relatedObjectDefinition, scopeKey,
+										null, dtoConverterContext,
+										filterString, Pagination.of(0, 200), StringPool.BLANK,
+										null).getItems();
+								
+								mapRelatedObjectEntriesToProps(objectEntry, key, rel, relatedObjectEntries);
+								
+							} catch (Exception e) {
+								_log.warn("Failed to add related object entries", e);
+							}
+
+						} catch (PortalException e) {
+							_log.warn("Failed to get related object definition", e);
+						}
+	            	}
+	            });
+	            
+	            return objectEntry;
 	        }
 	    }
 	}
 	
+	private void mapRelatedObjectEntriesToProps(
+	        ObjectEntry parentObjectEntry,
+	        String relName,
+	        DBRel relDef,
+	        Collection<ObjectEntry> relatedObjectEntries) {
+
+	    final String fkField = relDef.getForeignKeyField();
+
+	    final java.util.Set<String> excludedFields =
+	            new java.util.HashSet<>(java.util.Arrays.asList(fkField));
+
+	    java.util.List<Map<String, Object>> mapped = new java.util.ArrayList<>();
+
+	    for (ObjectEntry child : relatedObjectEntries) {
+	        Map<String, Object> childOut = new LinkedHashMap<>();
+
+	        childOut.put("externalReferenceCode", child.getExternalReferenceCode());
+
+	        Map<String, Object> props = child.getProperties();
+	        if (props != null) {
+	            for (Map.Entry<String, Object> e : props.entrySet()) {
+	                String name = e.getKey();
+	                if (!excludedFields.contains(name)) {
+	                    childOut.put(name, e.getValue());
+	                }
+	            }
+	        }
+
+	        mapped.add(childOut);
+	    }
+
+	    parentObjectEntry.getProperties().put(relName, mapped);
+	}
+
 	private int bindOne(PreparedStatement ps, int i, Object p) throws SQLException {
 	    if (p == null) {
 	        ps.setObject(i++, null);
@@ -408,7 +533,7 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 	            if (raw instanceof Number) return new java.math.BigDecimal(raw.toString());
 	            try { return new java.math.BigDecimal(String.valueOf(raw)); }
 	            catch (NumberFormatException e) { return null; }
-	        
+
 	        case DBProxyConstants.TYPE_INTEGER:
 	            if (raw instanceof Long) return raw;
 	            if (raw instanceof Integer) return raw;
@@ -465,11 +590,15 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 	private ObjectEntry mapRowToObjectEntry(
 	        ObjectDefinition def,
 	        java.sql.ResultSet rs,
-	        DTOConverterContext ctx) throws java.sql.SQLException {
+	        DTOConverterContext ctx) throws java.sql.SQLException, PortalException {
 
+    	final String objERC = def.getExternalReferenceCode();
+
+    	DBTableConfig config = DBTableConfigReaderUtil.getDBTableConfig(objERC);
+		
 	    ObjectEntry entry = new ObjectEntry();
 
-	    DBField ercField = CONFIG.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE);
+	    DBField ercField = config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE);
 	    Object rawId = null;
 	    try {
 	        rawId = rs.getObject(ercField.getDbColumn());
@@ -480,12 +609,12 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 	        if (StringPool.BLANK.equals(prefix)) {
 	            entry.setExternalReferenceCode(String.valueOf(rawId));
 	        } else {
-	            entry.setExternalReferenceCode(CONFIG.generateExternalReferenceCode(rawId, prefix));
+	            entry.setExternalReferenceCode(config.generateExternalReferenceCode(rawId, prefix));
 	        }
 	    }
 
 	    Map<String, Object> props = new LinkedHashMap<>();
-	    for (Map.Entry<String, DBField> e : CONFIG.getFields().entrySet()) {
+	    for (Map.Entry<String, DBField> e : config.getFields().entrySet()) {
 	        String fieldName = e.getKey();
 	        if (DBProxyConstants.EXTERNAL_REFERENCE_CODE.equals(fieldName)) continue;
 
@@ -494,7 +623,7 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 
 	        try {
 	            Object val = rs.getObject(col);
-	            if (val == null) continue;
+	            if (val == null) continue;        
 
 	            if (DBProxyConstants.TYPE_PICKLIST.equalsIgnoreCase(fieldDef.getType())) {
 	                String key = String.valueOf(val);
@@ -504,7 +633,12 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 	                if (name != null) pick.put("name", name);
 	                props.put(fieldName, pick);
 	            } else {
-	                props.put(fieldName, val);
+	            	String prefix = fieldDef.getPrefix();
+	            	if(val instanceof String && !StringPool.BLANK.equals(prefix)) {
+		                props.put(fieldName, prefix + (String) val);
+		        	} else {
+		                props.put(fieldName, val);
+		        	}
 	            }
 	        } catch (java.sql.SQLException ignore) { }
 	    }
@@ -537,14 +671,13 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 
 	@Override
 	public String getStorageLabel(Locale locale) {
-		return DBProxyConstants.DB_PROXY_LABEL;
+		return DBProxyConstants.DB_PROXY_LABEL + " [PARENT_CHILD]";
 	}
 
 	@Override
 	public String getStorageType() {
-		return DBProxyConstants.DB_PROXY;
+		return DBProxyConstants.DB_PROXY+ "_PARENT_CHILD";
 	}
-
 
 	@Reference
 	private CompanyLocalService _companyLocalService;
@@ -558,7 +691,12 @@ public class DBProxyObjectEntryManager extends BaseObjectEntryManager
 	private DTOConverter<com.liferay.object.model.ObjectEntry, ObjectEntry>
 		_objectEntryDTOConverter;
 
+	@Reference
+	private ObjectDefinitionLocalService _objectDefinitionLocalService;
+
     @Reference
     private DataSourceProvider _dsProvider;
 	
+    private static final Log _log = LogFactoryUtil.getLog(ParentChildProxyObjectEntryManager.class);
+    
 }

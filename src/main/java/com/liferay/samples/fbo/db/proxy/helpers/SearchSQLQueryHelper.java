@@ -5,11 +5,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.stream.Collectors;
 
-/**
- * Recherche plein-texte multi-colonnes.
- * - Postgres: ILIKE
- * - Autres (ex. SQL Server): LOWER(col) LIKE LOWER(?)
- */
 public final class SearchSQLQueryHelper {
 
     private SearchSQLQueryHelper() {}

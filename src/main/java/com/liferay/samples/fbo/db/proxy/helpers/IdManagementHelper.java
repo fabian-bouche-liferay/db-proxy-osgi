@@ -1,37 +1,41 @@
 package com.liferay.samples.fbo.db.proxy.helpers;
 
+import com.liferay.petra.string.StringPool;
 import com.liferay.samples.fbo.db.proxy.constants.DBProxyConstants;
 import com.liferay.samples.fbo.db.proxy.mapping.DBField;
 import com.liferay.samples.fbo.db.proxy.mapping.DBTableConfig;
 
 public class IdManagementHelper {
 
-	public static Long extractIdFromERC(String erc, DBTableConfig config) {
-	    if (erc == null || erc.trim().isEmpty()) return null;
-	    if (config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).hasPrefix()) {
-	        String prefix = config.getTableName() + "_";
-	        if (erc.startsWith(prefix)) {
-	            String idStr = erc.substring(prefix.length());
+	public static Long extractIdFromValue(String value, String prefix) {
+	    if (value == null || value.trim().isEmpty()) return null;
+	    if (StringPool.BLANK.equals(prefix)) {
+	        try { return Long.valueOf(value); } catch (NumberFormatException ignored) { return null; }
+	    } else {
+	        if (value.startsWith(prefix)) {
+	            String idStr = value.substring(prefix.length());
 	            try { return Long.valueOf(idStr); } catch (NumberFormatException ignore) { return null; }
 	        }
 	        return null;
-	    } else {
-	        try { return Long.valueOf(erc); } catch (NumberFormatException ignored) { return null; }
 	    }
 	}
 
-	public static Object parseIdParamFromERC(String erc, DBTableConfig config) {
-	    if (erc == null) return null;
-	    if (config.getField(DBProxyConstants.EXTERNAL_REFERENCE_CODE).hasPrefix()) {
-	        String prefix = config.getTableName() + "_";
-	        if (erc.startsWith(prefix)) {
-	            String idStr = erc.substring(prefix.length());
-	            try { return Long.valueOf(idStr); } catch (NumberFormatException e) { return idStr; }
-	        }
-	        // pas de préfixe → on tente long sinon string brute
-	        try { return Long.valueOf(erc); } catch (NumberFormatException e) { return erc; }
+	public static Object parseIdParamFromValue(String value, String prefix, String type) {
+	    if (value == null) return null;
+	    if (StringPool.BLANK.equals(prefix)) {
+	        try { return Long.valueOf(value); } catch (NumberFormatException e) { return value; }
 	    } else {
-	        try { return Long.valueOf(erc); } catch (NumberFormatException e) { return erc; }
+	        if (value.startsWith(prefix)) {
+	            String idStr = value.substring(prefix.length());
+	            try {
+	            	if(DBProxyConstants.TYPE_INTEGER.equals(type)) {
+		            	return Long.valueOf(idStr);
+	            	} else {
+	            		return idStr;
+	            	}
+	            } catch (NumberFormatException e) { return idStr; }
+	        }
+	        try { return Long.valueOf(value); } catch (NumberFormatException e) { return value; }
 	    }
 	}
 	
