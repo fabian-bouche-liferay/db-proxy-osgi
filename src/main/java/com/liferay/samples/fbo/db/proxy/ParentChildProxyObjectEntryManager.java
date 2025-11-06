@@ -275,6 +275,71 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
                 throw new java.util.NoSuchElementException("No entry found to update for ERC=" + externalReferenceCode);
             }
         }
+        
+        final Map<String, DBRel> rels = config.getRels();
+        
+        for (Map.Entry<String, DBRel> relEntry : rels.entrySet()) {
+
+            final String relName = relEntry.getKey();
+            final DBRel relDef = relEntry.getValue();
+
+            Object raw = props.get(relName);
+            if (raw == null) {
+                continue;
+            }
+
+            ObjectDefinition childObjectDef =
+                _objectDefinitionLocalService.getObjectDefinitionByExternalReferenceCode(
+                    relDef.getObjectDefERC(), companyId);
+
+            final String parentFkPrefix = relDef.getForeignKeyFieldPrefix();
+            final String parentFkType   = relDef.getForeignKeyFieldType();
+            final String fkFieldName    = relDef.getForeignKeyField();
+
+            if (raw instanceof List) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> childPropsList = (List<Map<String, Object>>) raw;
+
+                for (Map<String, Object> childProps : childPropsList) {
+
+                    ObjectEntry childEntry = new ObjectEntry();
+
+                    Map<String, Object> extractedChildProps = new HashMap<>();
+                    String childERC = null;
+
+                    Object parentDbId =
+                        IdManagementHelper.parseIdParamFromValue(
+                            externalReferenceCode, parentFkPrefix, parentFkType);
+                    childProps.put(fkFieldName, parentDbId);
+
+                    for (Map.Entry<String, Object> p : childProps.entrySet()) {
+                        if ("externalReferenceCode".equals(p.getKey())) {
+                            childERC = (String) p.getValue();
+                        } else {
+                            extractedChildProps.put(p.getKey(), p.getValue());
+                        }
+                    }
+
+                    if (childERC != null && existsObjectEntry(companyId, childObjectDef, childERC, dtoConverterContext, scopeKey)) {
+                        if (_log.isDebugEnabled()) {
+                            _log.debug("Skip existing related object " + childERC + " for relation " + relName);
+                        }
+                        continue;
+                    }
+
+                    if (childERC != null) {
+                        childEntry.setExternalReferenceCode(childERC);
+                    }
+                    childEntry.setProperties(extractedChildProps);
+
+                    try {
+                        addObjectEntry(dtoConverterContext, childObjectDef, childEntry, scopeKey);
+                    } catch (Exception ex) {
+                        _log.warn("Failed to add related object for relation " + relName, ex);
+                    }
+                }
+            }
+        }        
 
         return getObjectEntry(companyId, dtoConverterContext, externalReferenceCode, objectDefinition, scopeKey);
     }
@@ -419,8 +484,15 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
 						try {
 							relatedObjectDefinition = _objectDefinitionLocalService.getObjectDefinitionByExternalReferenceCode(relatedObjectDefinitionExternalReferenceCode, companyId);
 							
-		            		String filterString = rel.getForeignKeyField() + " eq " + externalReferenceCode;
-		            		try {
+							Object fkValue = IdManagementHelper.parseIdParamFromValue(
+							        externalReferenceCode,
+							        rel.getForeignKeyFieldPrefix(),
+							        rel.getForeignKeyFieldType()
+							);
+
+							String filterString = rel.getForeignKeyField() + " eq " + toODataLiteral(fkValue, rel.getForeignKeyFieldType());
+
+							try {
 								Collection<ObjectEntry> relatedObjectEntries = getObjectEntries(companyId, relatedObjectDefinition, scopeKey,
 										null, dtoConverterContext,
 										filterString, Pagination.of(0, 200), StringPool.BLANK,
@@ -647,6 +719,20 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
 	    return entry;
 	}
 	
+	private boolean existsObjectEntry(
+	        long companyId,
+	        ObjectDefinition objectDefinition,
+	        String externalReferenceCode,
+	        DTOConverterContext dtoConverterContext,
+	        String scopeKey) {
+	    try {
+	        getObjectEntry(companyId, dtoConverterContext, externalReferenceCode, objectDefinition, scopeKey);
+	        return true;
+	    } catch (Exception e) {
+	        return false;
+	    }
+	}
+	
 	private String applyPagination(String dbProductName, String sql, int offset, int limit, String defaultOrderBy) {
 	    String product = (dbProductName == null ? "" : dbProductName).toLowerCase(java.util.Locale.ROOT);
 
@@ -668,6 +754,51 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
 
 	    return sql + " LIMIT " + limit + " OFFSET " + offset;
 	}
+	
+	private String toODataLiteral(Object value, String type) {
+	    if (value == null) return "null";
+
+	    String t = (type == null) ? DBProxyConstants.TYPE_TEXT : type.toLowerCase(java.util.Locale.ROOT);
+
+	    switch (t) {
+	        case DBProxyConstants.TYPE_INTEGER:
+	        case DBProxyConstants.TYPE_DECIMAL:
+	            return String.valueOf(value);
+
+	        case DBProxyConstants.TYPE_PICKLIST:
+	        case DBProxyConstants.TYPE_TEXT:
+	            String s = String.valueOf(value).replace("'", "''");
+	            return "'" + s + "'";
+
+	        case DBProxyConstants.TYPE_BOOLEAN:
+	            return String.valueOf(value);
+
+	        case DBProxyConstants.TYPE_DATE:
+	        case DBProxyConstants.TYPE_DATETIME:
+	            String iso;
+	            if (value instanceof java.time.temporal.TemporalAccessor) {
+	                if (value instanceof java.time.Instant) {
+	                    iso = java.time.OffsetDateTime.ofInstant((java.time.Instant) value, java.time.ZoneOffset.UTC).toString();
+	                } else if (value instanceof java.time.LocalDateTime) {
+	                    iso = ((java.time.LocalDateTime) value).toString();
+	                } else if (value instanceof java.time.LocalDate) {
+	                    iso = ((java.time.LocalDate) value).toString();
+	                } else {
+	                    iso = value.toString();
+	                }
+	            } else if (value instanceof java.util.Date) {
+	                iso = java.time.OffsetDateTime.ofInstant(((java.util.Date) value).toInstant(), java.time.ZoneOffset.UTC).toString();
+	            } else {
+	                iso = String.valueOf(value);
+	            }
+	            iso = iso.replace("'", "''");
+	            return "'" + iso + "'";
+
+	        default:
+	            String def = String.valueOf(value).replace("'", "''");
+	            return "'" + def + "'";
+	    }
+	}	
 
 	@Override
 	public String getStorageLabel(Locale locale) {
