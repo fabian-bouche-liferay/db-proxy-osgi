@@ -259,6 +259,8 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
         String sql = "UPDATE " + table + " SET " + String.join(", ", sets)
                 + " WHERE " + idCol + " = ?";
 
+        boolean update = true;
+        
         try (java.sql.Connection con = _dsProvider.getDataSource().getConnection();
              java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
 
@@ -272,8 +274,14 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
 
             int affected = ps.executeUpdate();
             if (affected == 0) {
-                throw new java.util.NoSuchElementException("No entry found to update for ERC=" + externalReferenceCode);
+            	update = false;
+                //throw new java.util.NoSuchElementException("No entry found to update for ERC=" + externalReferenceCode);
             }
+        }
+
+        if(!update) {
+           	addObjectEntry(dtoConverterContext, objectDefinition, objectEntry, scopeKey);
+           	// Any thrown exception will be thrown further and prevent related records insertions / updates
         }
         
         final Map<String, DBRel> rels = config.getRels();
@@ -320,17 +328,20 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
                         }
                     }
 
-                    if (childERC != null && existsObjectEntry(companyId, childObjectDef, childERC, dtoConverterContext, scopeKey)) {
-                        if (_log.isDebugEnabled()) {
-                            _log.debug("Skip existing related object " + childERC + " for relation " + relName);
-                        }
-                        continue;
-                    }
-
                     if (childERC != null) {
                         childEntry.setExternalReferenceCode(childERC);
                     }
                     childEntry.setProperties(extractedChildProps);
+                    
+                    if (childERC != null && existsObjectEntry(companyId, childObjectDef, childERC, dtoConverterContext, scopeKey)) {
+                    	updateObjectEntry(companyId, dtoConverterContext, childERC, childObjectDef, childEntry, scopeKey);
+                    	/*
+                        if (_log.isDebugEnabled()) {
+                            _log.debug("Skip existing related object " + childERC + " for relation " + relName);
+                        }
+                        */
+                        continue;
+                    }
 
                     try {
                         addObjectEntry(dtoConverterContext, childObjectDef, childEntry, scopeKey);
@@ -441,7 +452,13 @@ public class ParentChildProxyObjectEntryManager extends BaseObjectEntryManager
 	    String externalReferenceCode, ObjectDefinition objectDefinition,
 	    String scopeKey) throws Exception {
 
-		String nestedFieldsParam = dtoConverterContext.getHttpServletRequest().getParameter("nestedFields");
+		String nestedFieldsParam = null;
+		
+		try {
+			nestedFieldsParam = dtoConverterContext.getHttpServletRequest().getParameter("nestedFields");
+		} catch(Exception e) {
+			_log.debug("Could not read nestedFieldsParam", e);
+		}
 		
 		Collection<String> nestedFields;
 		
